@@ -113,21 +113,29 @@ ROBOTS_DISALLOW = [
 ]
 CRAWL_DELAY = 5  # seconds
 
-# Configure conversion
 converter = html2text.HTML2Text()
 converter.ignore_links = False
 converter.ignore_images = True
 converter.ignore_emphasis = False
-converter.body_width = 0  # no wrapping
+converter.body_width = 0
 
 def is_disallowed(url):
-    """Return True if the URL path matches any robots.txt Disallow rule."""
     parsed = urlparse(url)
     path = parsed.path
     for dis_path in ROBOTS_DISALLOW:
         if path.startswith(dis_path):
             return True
     return False
+
+def extract_service_name(sitemap_url):
+    """Extract first path component from sitemap URL as service name."""
+    parsed = urlparse(sitemap_url)
+    parts = [p for p in parsed.path.split('/') if p]
+    if parts:
+        # common case: parts[0] is the service name like 'AWSEC2'
+        return parts[0]
+    # fallback: use domain name part
+    return parsed.netloc.split('.')[0]
 
 def safe_filename(sitemap_url):
     """Create a safe .md filename from a sitemap URL."""
@@ -138,7 +146,6 @@ def safe_filename(sitemap_url):
     return f"{name}.md"
 
 def fetch_sitemap_urls(sitemap_url):
-    """Return list of page URLs from a sub-sitemap."""
     resp = requests.get(sitemap_url)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.content, 'xml')
@@ -150,7 +157,6 @@ def fetch_sitemap_urls(sitemap_url):
     return urls
 
 def scrape_page(url):
-    """Fetch page HTML and convert to markdown."""
     resp = requests.get(url)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, 'html.parser')
@@ -161,8 +167,7 @@ def scrape_page(url):
         html_content = resp.text
     return converter.handle(html_content)
 
-def process_sitemap(sitemap_url, repo_dir):
-    """Process one sub-sitemap: scrape all pages and write one .md file."""
+def process_sitemap(sitemap_url, output_dir):
     print(f"Processing sitemap: {sitemap_url}")
     try:
         page_urls = fetch_sitemap_urls(sitemap_url)
@@ -187,17 +192,19 @@ def process_sitemap(sitemap_url, repo_dir):
             markdown_parts.append(f"# Page: {page_url}\n\n*Error scraping this page: {e}*\n\n---\n")
 
     filename = safe_filename(sitemap_url)
-    file_path = os.path.join(repo_dir, filename)
+    file_path = os.path.join(output_dir, filename)
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(''.join(markdown_parts))
     print(f"Saved {filename}")
     return True
 
 def git_commit_and_push(repo_dir, message):
-    """Commit and push changes in repo_dir."""
     os.chdir(repo_dir)
     subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True)
     subprocess.run(['git', 'config', 'user.email', 'github-actions[bot]@users.noreply.github.com'], check=True)
+    # Fetch and rebase to incorporate any remote changes (prevents push conflicts)
+    subprocess.run(['git', 'fetch', 'origin', 'main'], check=True)
+    subprocess.run(['git', 'rebase', 'origin/main'], check=True)
     subprocess.run(['git', 'add', '.'], check=True)
     result = subprocess.run(['git', 'diff', '--cached', '--quiet'], capture_output=True)
     if result.returncode != 0:
@@ -210,14 +217,13 @@ def main():
     repo_dir = os.environ.get('GITHUB_WORKSPACE', os.getcwd())
     progress_file = os.path.join(repo_dir, 'progress.json')
 
-    # Load existing progress
+    # Load progress
     completed = []
     if os.path.exists(progress_file):
         with open(progress_file, 'r') as f:
             data = json.load(f)
             completed = data.get('completed', [])
 
-    # Fetch all sub-sitemaps from the index
     print("Fetching sitemap index...")
     resp = requests.get(SITEMAP_INDEX)
     resp.raise_for_status()
@@ -228,9 +234,8 @@ def main():
         if loc:
             all_sitemaps.append(loc.text.strip())
 
-    # Filter already completed
     remaining = [sm for sm in all_sitemaps if sm not in completed]
-    print(f"Total sub-sitemaps: {len(all_sitemaps)}, already completed: {len(completed)}, remaining: {len(remaining)}")
+    print(f"Total sub-sitemaps: {len(all_sitemaps)}, completed: {len(completed)}, remaining: {len(remaining)}")
 
     if not remaining:
         print("All sub-sitemaps are already processed!")
@@ -238,7 +243,12 @@ def main():
 
     for i, sitemap_url in enumerate(remaining, 1):
         print(f"\n=== Sub-sitemap {i}/{len(remaining)} ===")
-        success = process_sitemap(sitemap_url, repo_dir)
+        service_name = extract_service_name(sitemap_url)
+        # Create output directory: AWS/<service_name>/
+        output_dir = os.path.join(repo_dir, "AWS", service_name)
+        os.makedirs(output_dir, exist_ok=True)
+
+        success = process_sitemap(sitemap_url, output_dir)
         if success:
             completed.append(sitemap_url)
             with open(progress_file, 'w') as f:

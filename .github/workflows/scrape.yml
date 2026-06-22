@@ -1,9 +1,14 @@
 name: Scrape AWS Docs
 
 on:
-  workflow_dispatch:      # you can also trigger manually anytime
+  workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'   # runs every hour on the hour
+    - cron: '0 * * * *'   # every hour
+
+# Ensure only one run at a time
+concurrency:
+  group: aws-docs-scrape
+  cancel-in-progress: false
 
 jobs:
   scrape:
@@ -22,7 +27,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14.6'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
